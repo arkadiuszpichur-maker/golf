@@ -446,13 +446,50 @@ let meta={dirty:{}};
 let ui={view:'round',rid:null,hole:0,draft:{t:null,c:null},sel:null,filter:'10',course:'',cv:'all',trendType:'chip',review:null,newOpen:false,editCourse:null,cmp:null,cmpFilter:'all'};
 function lsLoad(){try{const j=JSON.parse(localStorage.getItem(LS)||'null');if(j&&j.S){S=j.S;S.tomb=S.tomb||{};meta=j.meta||{dirty:{}};if(j.ui){ui.rid=j.ui.rid;ui.hole=j.ui.hole||0}}}catch(e){}}
 function lsSave(){try{localStorage.setItem(LS,JSON.stringify({S,meta,ui:{rid:ui.rid,hole:ui.hole}}))}catch(e){}}
+/* ---------- synchronizacja z komputerem przez GitHub (prywatne repozytorium, plik rundy.json) ----------
+   Token zapisuje się tylko w tym telefonie (osobny klucz, nie trafia do kopii JSON ani do kodu strony). */
+var GH_KEY='golf-gh-v1',ghBusy=false,ghTimer=null;
+function ghCfg(){try{return JSON.parse(localStorage.getItem(GH_KEY)||'null')||{}}catch(e){return {}}}
+function ghSet(c){try{localStorage.setItem(GH_KEY,JSON.stringify(c))}catch(e){}}
+function ghB64(str){const b=new TextEncoder().encode(str);let s='';for(let i=0;i<b.length;i+=0x8000)s+=String.fromCharCode.apply(null,b.subarray(i,i+0x8000));return btoa(s)}
+function ghStamp(){if(!S.settings)return '';return (S.settings.updated||0)+'|'+Object.values(S.rounds).map(r=>r.id+':'+(r.updated||0)).sort().join(',')}
+function ghStatusTxt(){const c=ghCfg();if(!c.token)return 'Nie skonfigurowano.';
+  const kiedy=c.last?new Date(c.last).toLocaleString('pl-PL'):'jeszcze nie wysłano';
+  return (c.lastErr?'Błąd: '+c.lastErr+' · ':'')+'Ostatnia wysyłka: '+kiedy+(c.sentStamp&&c.sentStamp!==ghStamp()?' · są niewysłane zmiany':'')}
+function ghShow(){const el=document.getElementById('ghStatus');if(el)el.textContent=ghStatusTxt()}
+async function ghSend(manual){
+  const c=ghCfg();if(!c.token||!c.repo){if(manual)toast('Uzupełnij repozytorium i token');return}
+  if(ghBusy)return;ghBusy=true;if(manual)toast('Wysyłam…');
+  const url='https://api.github.com/repos/'+c.repo+'/contents/rundy.json';
+  const h={'Authorization':'Bearer '+c.token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'};
+  const stamp=ghStamp();
+  try{
+    let sha;const g=await fetch(url,{headers:h,cache:'no-store'});
+    if(g.ok)sha=(await g.json()).sha;else if(g.status!==404)throw new Error(g.status===401?'nieprawidłowy token':g.status===403?'brak uprawnień tokenu':'HTTP '+g.status);
+    const body={message:'Rundy z telefonu '+new Date().toLocaleString('pl-PL'),content:ghB64(JSON.stringify({settings:S.settings,rounds:S.rounds},null,1))};if(sha)body.sha=sha;
+    const p=await fetch(url,{method:'PUT',headers:h,body:JSON.stringify(body)});
+    if(!p.ok)throw new Error(p.status===404?'nie znaleziono repozytorium (sprawdź nazwę i uprawnienia tokenu)':'HTTP '+p.status);
+    const c2=ghCfg();c2.last=Date.now();c2.lastErr='';c2.sentStamp=stamp;ghSet(c2);if(manual)toast('Wysłano na GitHub');
+  }catch(e){const c2=ghCfg();c2.lastErr=String(e&&e.message||e);ghSet(c2);if(manual)toast('Nie udało się wysłać: '+c2.lastErr)}
+  finally{ghBusy=false;ghShow()}
+}
+/* automatyczna wysyłka: 2 min po ostatniej zmianie albo przy zamknięciu / zminimalizowaniu aplikacji, tylko z zasięgiem */
+function ghAuto(teraz){
+  if(window.__GOLF__)return;               // widok osadzony na PC – bez wysyłki
+  const c=ghCfg();if(!c.token||c.auto===false||!navigator.onLine)return;
+  if(c.sentStamp===ghStamp())return;
+  clearTimeout(ghTimer);ghTimer=setTimeout(()=>ghSend(false),teraz?0:120000);
+}
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')ghAuto(true)});
+window.addEventListener('online',()=>ghAuto(true));
+setTimeout(()=>ghAuto(true),4000);          // przy starcie: wyślij zaległe zmiany
 lsLoad();
 if(!S.settings)S.settings=defaultSettings();
 S.settings=normalize(S.settings);
 
 let COL=null,flushing=false,flushTimer=null,firstSnap=true;
 function setSync(st,txt){const el=$('#sync');if(!el)return;el.querySelector('.dot').className='dot '+st;el.querySelector('span:last-child').textContent=txt}
-function markDirty(id){meta.dirty[id]=Date.now();lsSave();if(COL){setSync('wait','zapisuję…');clearTimeout(flushTimer);flushTimer=setTimeout(flush,700)}}
+function markDirty(id){meta.dirty[id]=Date.now();lsSave();ghAuto(false);if(COL){setSync('wait','zapisuję…');clearTimeout(flushTimer);flushTimer=setTimeout(flush,700)}}
 function touchRound(r){r.updated=Date.now();markDirty('r-'+r.id)}
 function touchSettings(){S.settings.updated=Date.now();markDirty('settings')}
 async function flush(){
@@ -1220,6 +1257,17 @@ function renderSettings(){
     <p class="muted small">Dane zapisują się w przeglądarce i – po zalogowaniu w claude.ai – synchronizują między telefonem a komputerem. Kopia JSON pozwala przenieść lub zarchiwizować wszystko.</p>
     <div class="row"><button class="btn" data-act="exportJson">Pobierz kopię JSON</button><button class="btn" data-act="exportCsv">Pobierz uderzenia CSV</button><button class="btn" data-act="importJson">Wczytaj kopię JSON</button></div>
   </div>
+  ${(()=>{const gc=ghCfg();return `<div class="panel">
+    <h3 style="margin-top:0">Synchronizacja z komputerem (GitHub)</h3>
+    <p class="muted small">Rundy i ustawienia trafiają do prywatnego repozytorium GitHub, skąd pobiera je HUB AI na komputerze. Token zapisuje się tylko w tym telefonie.</p>
+    <div class="lbl">Repozytorium (właściciel/nazwa)</div>
+    <input id="ghRepo" class="inp" autocomplete="off" value="${esc(gc.repo||'arkadiuszpichur-maker/golf-dane')}">
+    <div class="lbl" style="margin-top:8px">Token dostępu GitHub</div>
+    <input id="ghToken" class="inp" type="password" autocomplete="off" placeholder="${gc.token?'zapisany – wpisz nowy, aby zmienić':'github_pat_…'}">
+    <label class="small" style="display:flex;gap:8px;align-items:center;margin:10px 0"><input type="checkbox" id="ghAutoChk" ${gc.auto!==false?'checked':''}> Wysyłaj automatycznie (po zmianach i przy zamknięciu aplikacji, gdy jest zasięg)</label>
+    <div class="row"><button class="btn primary" data-act="ghSave">Zapisz</button><button class="btn" data-act="ghSendNow">Wyślij teraz</button></div>
+    <p class="muted small" id="ghStatus" style="margin-bottom:0">${esc(ghStatusTxt())}</p>
+  </div>`})()}
   <div class="panel">
     <h3 style="margin-top:0">Start od zera</h3>
     <p class="muted small">Usuwa wszystkie rundy wszystkich graczy (teraz: ${rounds().length}) i zaczyna historię kryteriów każdego gracza od nowa – obecne kryteria stają się wersją v1. Gracze, kije, kryteria, wartości ocen, pola i przedziały puttów zostają. Użyj przed pierwszą prawdziwą rundą.</p>
@@ -1516,6 +1564,10 @@ function act(e){
     case 'exportJson':saveFile(`golf-dziennik-${today()}.json`,JSON.stringify({settings:S.settings,rounds:S.rounds},null,1),'application/json');break;
     case 'exportCsv':saveFile(`golf-uderzenia-${today()}.csv`,csv(),'text/csv');break;
     case 'importJson':$('#importFile').click();break;
+    case 'ghSave':{const c=ghCfg();c.repo=($('#ghRepo').value||'').trim().replace(/^https?:\/\/github\.com\//,'').replace(/\/+$/,'');
+      const t=($('#ghToken').value||'').trim();if(t)c.token=t;c.auto=$('#ghAutoChk').checked;ghSet(c);$('#ghToken').value='';
+      $('#ghToken').placeholder=c.token?'zapisany – wpisz nowy, aby zmienić':'github_pat_…';toast('Zapisano ustawienia synchronizacji');ghShow();break}
+    case 'ghSendNow':ghSend(true);break;
     case 'wipeRounds':{const ids=Object.keys(S.rounds);
       if(!ask(el,'wipe',ids.length?`Usunąć wszystkie rundy (${ids.length}) wszystkich graczy i zacząć historię kryteriów od v1? Tego nie da się cofnąć – jeśli chcesz, najpierw pobierz kopię JSON.`:'Zacząć historię kryteriów od v1? Obecne kryteria staną się wersją v1 z dzisiejszą datą.',{ok:ids.length?'Usuń wszystko':'Zacznij od v1',danger:!!ids.length}))return;if(!confirmDiscard(el))return;
       const now=Date.now();ids.forEach(id=>{delete S.rounds[id];S.tomb[id]=now;meta.dirty['r-'+id]=now});
