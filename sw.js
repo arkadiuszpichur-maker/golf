@@ -1,6 +1,6 @@
 // Service worker aplikacji Golf – tryb offline.
 // Po każdej zmianie index.html podbij numer wersji, żeby telefon pobrał nową wersję.
-const WERSJA = 'golf-v1';
+const WERSJA = 'golf-v2';
 const PLIKI = ['./', './index.html', './manifest.webmanifest', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
